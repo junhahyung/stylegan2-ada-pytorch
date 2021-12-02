@@ -70,6 +70,10 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
             arch_fname = os.path.relpath(fname, source_dir)
             arch_fname = arch_fname.replace('\\', '/')
             img = np.array(PIL.Image.open(fname))
+            if img.shape==(28,28):
+                img = np.pad(img, [(2,2), (2,2)], 'constant', constant_values=0)
+                img = np.repeat(img.reshape(32,32,1), 3, axis=-1)
+
             yield dict(img=img, label=labels.get(arch_fname))
             if idx >= max_idx-1:
                 break
@@ -196,6 +200,67 @@ def open_mnist(images_gz: str, *, max_images: Optional[int]):
 
 #----------------------------------------------------------------------------
 
+def open_mnist_and_cifar10(mnist_images_gz: str, cifar_images_gz:str, *, max_images: Optional[int]):
+    mnist_labels_gz = mnist_images_gz.replace('-images-idx3-ubyte.gz', '-labels-idx1-ubyte.gz')
+    assert mnist_labels_gz != mnist_images_gz
+    images_mnist = []
+    labels_mnist= []
+
+    with gzip.open(mnist_images_gz, 'rb') as f:
+        images_mnist = np.frombuffer(f.read(), np.uint8, offset=16)
+    with gzip.open(mnist_labels_gz, 'rb') as f:
+        labels_mnist = np.frombuffer(f.read(), np.uint8, offset=8)
+
+    images_mnist = images_mnist.reshape(-1, 28, 28)
+    images_mnist = np.pad(images_mnist, [(0,0), (2,2), (2,2)], 'constant', constant_values=0)
+    images_mnist = np.repeat(images_mnist.reshape(-1, 32, 32, 1), 3, axis=-1)
+    assert images_mnist.shape == (60000, 32, 32, 3) and images_mnist.dtype == np.uint8
+    assert labels_mnist.shape == (60000,) and labels_mnist.dtype == np.uint8
+    assert np.min(images_mnist) == 0 and np.max(images_mnist) == 255
+    assert np.min(labels_mnist) == 0 and np.max(labels_mnist) == 9
+
+    max_idx = maybe_min(len(images_mnist), max_images)
+
+
+
+    images_cifar = []
+    labels_cifar = []
+    tarball = cifar_images_gz
+    with tarfile.open(tarball, 'r:gz') as tar:
+        for batch in range(1, 6):
+            member = tar.getmember(f'cifar-10-batches-py/data_batch_{batch}')
+            with tar.extractfile(member) as file:
+                data = pickle.load(file, encoding='latin1')
+            images_cifar.append(data['data'].reshape(-1, 3, 32, 32))
+            labels_cifar.append(data['labels'])
+
+    images_cifar = np.concatenate(images_cifar)
+    labels_cifar = np.concatenate(labels_cifar)
+    images_cifar = images_cifar.transpose([0, 2, 3, 1]) # NCHW -> NHWC
+    assert images_cifar.shape == (50000, 32, 32, 3) and images_cifar.dtype == np.uint8
+    assert labels_cifar.shape == (50000,) and labels_cifar.dtype in [np.int32, np.int64]
+    assert np.min(images_cifar) == 0 and np.max(images_cifar) == 255
+    assert np.min(labels_cifar) == 0 and np.max(labels_cifar) == 9
+
+    max_idx += maybe_min(len(images_cifar), max_images)
+
+    images = np.concatenate((images_mnist, images_cifar))
+    labels = np.concatenate((labels_mnist, labels_cifar+10))
+
+    assert images.shape == (110000,32,32,3) and images.dtype == np.uint8
+    assert labels.shape == (110000,) and labels.dtype in [np.int32, np.int64]
+    assert np.min(images) == 0 and np.max(images) == 255
+    assert np.min(labels) == 0 and np.max(labels) == 19
+
+
+    def iterate_images():
+        for idx, img in enumerate(images):
+            yield dict(img=img, label=int(labels[idx]))
+            if idx >= max_idx-1:
+                break
+
+    return max_idx, iterate_images()
+
 def make_transform(
     transform: Optional[str],
     output_width: Optional[int],
@@ -250,7 +315,11 @@ def make_transform(
 #----------------------------------------------------------------------------
 
 def open_dataset(source, *, max_images: Optional[int]):
-    if os.path.isdir(source):
+    if type(source) == list and len(source) == 2:
+        if os.path.isfile(source[0]) and os.path.isfile(source[1]):
+            if os.path.basename(source[1]) == 'cifar-10-python.tar.gz' and os.path.basename(source[0]) == 'train-images-idx3-ubyte.gz':
+                return open_mnist_and_cifar10(source[0], source[1], max_images=110000)
+    elif os.path.isdir(source):
         if source.rstrip('/').endswith('_lmdb'):
             return open_lmdb(source, max_images=max_images)
         else:
@@ -304,6 +373,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.command()
 @click.pass_context
 @click.option('--source', help='Directory or archive name for input dataset', required=True, metavar='PATH')
+@click.option('--source2', help='Directory or archive name for input dataset', metavar='PATH')
 @click.option('--dest', help='Output directory or archive name for output dataset', required=True, metavar='PATH')
 @click.option('--max-images', help='Output only up to `max-images` images', type=int, default=None)
 @click.option('--resize-filter', help='Filter to use when resizing images for output resolution', type=click.Choice(['box', 'lanczos']), default='lanczos', show_default=True)
@@ -314,6 +384,7 @@ def convert_dataset(
     ctx: click.Context,
     source: str,
     dest: str,
+    source2: Optional[str],
     max_images: Optional[int],
     transform: Optional[str],
     resize_filter: str,
@@ -384,6 +455,9 @@ def convert_dataset(
     if dest == '':
         ctx.fail('--dest output filename or directory must not be an empty string')
 
+    if source2:
+        print(f"source2: {source2}")
+        source = [source, source2]
     num_files, input_iter = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
 
@@ -427,6 +501,7 @@ def convert_dataset(
 
         # Save the image as an uncompressed PNG.
         img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
+        #img = PIL.Image.fromarray(img, 'RGB')
         image_bits = io.BytesIO()
         img.save(image_bits, format='png', compress_level=0, optimize=False)
         save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())

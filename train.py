@@ -48,6 +48,10 @@ def setup_training_loop_kwargs(
     kimg       = None, # Override training duration: <int>
     batch      = None, # Override batch size: <int>
 
+    # quantization
+    quantize   = None,
+    nbits      = None,
+
     # Discriminator augmentation.
     aug        = None, # Augmentation mode: 'ada' (default), 'noaug', 'fixed'
     p          = None, # Specify p for 'fixed' (required): <float>
@@ -151,6 +155,11 @@ def setup_training_loop_kwargs(
     assert isinstance(cfg, str)
     desc += f'-{cfg}'
 
+    if quantize is None:
+        quantize = False
+    if nbits is None:
+        nbits = 2
+
     cfg_specs = {
         'auto':      dict(ref_gpus=-1, kimg=25000,  mb=-1, mbstd=-1, fmaps=-1,  lrate=-1,     gamma=-1,   ema=-1,  ramp=0.05, map=2), # Populated dynamically based on resolution and GPU count.
         'stylegan2': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=10,   ema=10,  ramp=None, map=8), # Uses mixed-precision, unlike the original StyleGAN2.
@@ -178,6 +187,8 @@ def setup_training_loop_kwargs(
     args.G_kwargs.synthesis_kwargs.channel_base = args.D_kwargs.channel_base = int(spec.fmaps * 32768)
     args.G_kwargs.synthesis_kwargs.channel_max = args.D_kwargs.channel_max = 512
     args.G_kwargs.mapping_kwargs.num_layers = spec.map
+    args.G_kwargs.mapping_kwargs.quantize = quantize
+    args.G_kwargs.mapping_kwargs.nbits = nbits
     args.G_kwargs.synthesis_kwargs.num_fp16_res = args.D_kwargs.num_fp16_res = 4 # enable mixed-precision training
     args.G_kwargs.synthesis_kwargs.conv_clamp = args.D_kwargs.conv_clamp = 256 # clamp activations to avoid float16 overflow
     args.D_kwargs.epilogue_kwargs.mbstd_group_size = spec.mbstd
@@ -417,6 +428,10 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--gamma', help='Override R1 gamma', type=float)
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
 @click.option('--batch', help='Override batch size', type=int, metavar='INT')
+
+# quantization
+@click.option('--quantize', help='use quantization [default: false]', type=bool)
+@click.option('--nbits', help='quantization bits [default: 2]', type=int)
 
 # Discriminator augmentation.
 @click.option('--aug', help='Augmentation mode [default: ada]', type=click.Choice(['noaug', 'ada', 'fixed']))

@@ -23,6 +23,7 @@ from torch_utils.ops import grid_sample_gradfix
 
 import legacy
 from metrics import metric_main
+import wandb
 
 #----------------------------------------------------------------------------
 
@@ -130,9 +131,13 @@ def training_loop(
     conv2d_gradfix.enabled = True                       # Improves training speed.
     grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
 
-    # Load training set.
+    os.environ["WANDB_START_METHOD"] = "thread"
     if rank == 0:
+        print('set up wandb...')
+        wandb.init(entity='junha', project="quantize-gan", dir=run_dir, name=run_dir)
         print('Loading training set...')
+
+    # Load training set.
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
@@ -375,6 +380,7 @@ def training_loop(
                     dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
+                    wandb.log({'fid50k': result_dict['results']['fid50k_full']}, step=cur_nimg//1000)
                 stats_metrics.update(result_dict.results)
         del snapshot_data # conserve memory
 
